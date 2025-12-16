@@ -1,0 +1,17 @@
+{
+  "id": "imperius",
+  "name": "Imperius",
+  "symbol": "♔",
+  "color": "#b33a3a",
+  "description": "A venerable empire focused on balanced growth, strong cities, and disciplined armies.",
+  "startingStars": 50,
+  "startTechs": ["agriculture","bronze-working","mining"],
+  "startingUnits": [
+    { "type": "settler", "spawnNearCapital": true },
+    { "type": "scout", "x": 1, "y": 0, "z": 0 }
+  ],
+  "traits": ["expansionist","disciplined"],
+  "bonuses": { "income": 1.1, "movement": 1.0, "vision": 0.5, "defense": 0.2 },
+  "metadata": { "author": "example-author", "version": "0.1.0" },
+  "__notes": "Human-editable template. Use spawnNearCapital:true to place a unit adjacent to the capital, or provide explicit relative coords (x,y,z). startTechs must reference tech IDs defined in the project configuration. Adjust bonuses as numeric multipliers or additive values depending on engine expectations."
+}

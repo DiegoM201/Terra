@@ -2,6 +2,7 @@ import React, { useState, useEffect, CSSProperties, useRef, useCallback, useMemo
 import { WhiteboxEngine } from '../services/engine';
 import { GameConfig, TurnState, Entity, Tile, Visibility, UnitDefinition } from '../types';
 import { DEFAULT_CONFIG, RESOURCE_ICONS, COLOR_PALETTE } from '../constants';
+import { loadNations } from '../services/nations';
 
 // --- HEXAGONAL GEOMETRY CONFIGURATION ---
 const HEX_METRICS = {
@@ -260,6 +261,7 @@ const HexTile = React.memo(({
 
 export const PrototypeView: React.FC = () => {
   const [engine, setEngine] = useState<WhiteboxEngine>(() => new WhiteboxEngine(DEFAULT_CONFIG));
+    const [nations, setNations] = useState<Record<string, any>>({});
   const [turnNumber, setTurnNumber] = useState(1);
   const [currentOwner, setCurrentOwner] = useState('player');
   const [playerState, setPlayerState] = useState(engine.playerState);
@@ -369,7 +371,77 @@ export const PrototypeView: React.FC = () => {
   };
 
   useEffect(() => {
+      // Load nation definitions and apply the first one as default
+      loadNations().then(loaded => {
+          setNations(loaded || {});
+          const keys = Object.keys(loaded || {});
+          if (keys.length > 0) {
+              // apply first nation automatically
+              const nation = loaded[keys[0]];
+              applyNationToEngine(nation);
+          }
+      }).catch(() => {});
+
     const onGridGenerated = (payload: any) => {
+
+          // Apply a nation JSON into the engine: stars, unlocked techs, spawn starting units
+          const applyNationToEngine = (nation: any) => {
+            if (!nation) return;
+            // Apply starting stars
+            if (typeof nation.startingStars === 'number') {
+                engine.players['player'].stars = nation.startingStars;
+                engine.emit('ECONOMY_UPDATE', engine.players['player']);
+            }
+
+            // Apply startTechs
+            if (Array.isArray(nation.startTechs)) {
+                engine.players['player'].unlockedTechs = Array.from(new Set([...(engine.players['player'].unlockedTechs || []), ...nation.startTechs]));
+                engine.emit('ECONOMY_UPDATE', engine.players['player']);
+            }
+
+            // Find player's capital (created at grid generation). If not found, skip unit spawns.
+            const capital = engine.entities.find(e => e.type === 'city' && e.ownerId === 'player');
+
+            (nation.startingUnits || []).forEach((unit: any) => {
+                let tx = capital ? capital.x : 0;
+                let ty = capital ? capital.y : 0;
+                let tz = capital ? capital.z : 0;
+
+                if (unit.spawnNearCapital && capital) {
+                    // find first neighbor tile that is passable and not occupied
+                    const neighbors = engine.getNeighbors(tx, ty, tz);
+                    let placed = false;
+                    for (const n of neighbors) {
+                        const occ = engine.getUnitAt(n.x, n.y, tz);
+                        if (!occ && engine.isValidCoordinate(n.x, n.y, tz) && engine.grid[tz][n.y][n.x].type !== 'Void') {
+                            engine.createEntity(unit.type, n.x, n.y, tz, true, 'player');
+                            placed = true;
+                            break;
+                        }
+                    }
+                    if (!placed && capital) {
+                        engine.createEntity(unit.type, tx, ty, tz, true, 'player');
+                    }
+                } else if (typeof unit.x === 'number' && typeof unit.y === 'number') {
+                    // Treat as relative offsets from capital if capital exists, otherwise absolute
+                    if (capital) {
+                        tx = capital.x + unit.x;
+                        ty = capital.y + unit.y;
+                        tz = (typeof unit.z === 'number') ? (capital.z + unit.z) : capital.z;
+                    } else {
+                        tx = unit.x;
+                        ty = unit.y;
+                        tz = unit.z || 0;
+                    }
+                    if (engine.isValidCoordinate(tx, ty, tz)) engine.createEntity(unit.type, tx, ty, tz, true, 'player');
+                }
+            });
+
+            // notify UI to update
+            setEntities([...engine.entities]);
+            setPlayerState({...engine.playerState});
+            engine.triggerVisibilityUpdate();
+          };
         addLog(`EVENT: Grid Generated (Seed: ${payload.seed}, Size: ${payload.width}x${payload.height})`);
         setEntities([...engine.entities]);
         setPlayerState({...engine.playerState});
