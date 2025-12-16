@@ -8,6 +8,11 @@ export class WhiteboxEngine {
   // Grid is now 3D: [z][y][x]
   grid: Tile[][][] = [];
   entities: Entity[] = [];
+  
+  // Spatial Hashing for O(1) Lookups
+  private unitLookup: Map<string, Entity> = new Map(); // Key: "x,y,z"
+  private cityLookup: Map<string, Entity> = new Map(); // Key: "x,y,z"
+
   config: GameConfig;
   turnState: TurnState = TurnState.INPUT; 
   turnNumber: number = 1;
@@ -18,6 +23,9 @@ export class WhiteboxEngine {
   
   // simple event bus
   listeners: Record<string, EventCallback[]> = {};
+
+  // Fog Optimization
+  private pendingVisibilityUpdate = false;
 
   constructor(config: GameConfig) {
     this.config = config;
@@ -30,6 +38,11 @@ export class WhiteboxEngine {
   
   get playerState(): PlayerState { return this.players['player']; }
   get enemyState(): PlayerState { return this.players['enemy_ai']; }
+
+  // --- Spatial Helpers ---
+  private getHash(x: number, y: number, z: number): string {
+      return `${x},${y},${z}`;
+  }
 
   // --- Event System ---
   on(event: string, cb: EventCallback) {
@@ -54,6 +67,8 @@ export class WhiteboxEngine {
     const { width, height, noiseSeed } = this.config.map;
     this.grid = [];
     this.entities = []; 
+    this.unitLookup.clear();
+    this.cityLookup.clear();
     
     // 1. Base Noise Function (Deterministic)
     const pseudoRandom = (x: number, y: number, z: number, seed: number) => {
@@ -195,6 +210,7 @@ export class WhiteboxEngine {
 
     this.calculateIncome('player');
     this.calculateIncome('enemy_ai');
+    this.triggerVisibilityUpdate();
     this.emit('GRID_GENERATED', { width, height, seed: noiseSeed });
   }
 
@@ -436,11 +452,24 @@ export class WhiteboxEngine {
       });
   }
 
-  // --- Fog of War ---
+  // --- Fog of War System ---
+
+  // Debounce visibility updates to avoid thrashing during multi-unit moves/turn resolution
+  triggerVisibilityUpdate() {
+      if (this.pendingVisibilityUpdate) return;
+      this.pendingVisibilityUpdate = true;
+      
+      // Execute in next microtask
+      queueMicrotask(() => {
+          this.updateVisibility();
+          this.pendingVisibilityUpdate = false;
+      });
+  }
 
   updateVisibility() {
-    const visibleKeys = new Set<string>(); // Key format: "x,y,z"
+    const activeVisionKeys = new Set<string>(); // Tiles currently being watched
 
+    // 1. Calculate Active Vision
     for (const entity of this.entities) {
       if (entity.ownerId !== 'player') continue;
 
@@ -448,29 +477,33 @@ export class WhiteboxEngine {
       
       const tiles = this.getTilesInRange(entity.x, entity.y, entity.z, visionRange);
       for (const t of tiles) {
-        visibleKeys.add(`${t.x},${t.y},${entity.z}`);
+        activeVisionKeys.add(`${t.x},${t.y},${entity.z}`);
       }
     }
 
     let hasChanges = false;
-    // Iterate all layers
+    
+    // 2. Iterate Grid to Apply States
     for (let z = 0; z < this.grid.length; z++) {
         for (let y = 0; y < this.config.map.height; y++) {
           for (let x = 0; x < this.config.map.width; x++) {
             const tile = this.grid[z][y][x];
             const key = `${x},${y},${z}`;
-            const shouldBeVisible = visibleKeys.has(key);
+            const isCurrentlyVisible = activeVisionKeys.has(key);
 
-            if (shouldBeVisible) {
-              if (tile.visibility !== Visibility.VISIBLE) {
-                tile.visibility = Visibility.VISIBLE;
-                hasChanges = true;
-              }
+            if (isCurrentlyVisible) {
+                // HIDDEN/FOGGED -> VISIBLE
+                if (tile.visibility !== Visibility.VISIBLE) {
+                    tile.visibility = Visibility.VISIBLE;
+                    hasChanges = true;
+                }
             } else {
-              if (tile.visibility === Visibility.VISIBLE) {
-                tile.visibility = Visibility.FOGGED;
-                hasChanges = true;
-              }
+                // VISIBLE -> FOGGED (Explored but currently hidden)
+                if (tile.visibility === Visibility.VISIBLE) {
+                    tile.visibility = Visibility.FOGGED;
+                    hasChanges = true;
+                }
+                // If it was HIDDEN, it stays HIDDEN
             }
           }
         }
@@ -519,7 +552,16 @@ export class WhiteboxEngine {
     });
 
     this.entities.push(newEntity);
-    if (ownerId === 'player') this.updateVisibility();
+    
+    // Register Cache
+    const hash = this.getHash(x, y, z);
+    if (unitKey === 'city') {
+        this.cityLookup.set(hash, newEntity);
+    } else {
+        this.unitLookup.set(hash, newEntity);
+    }
+
+    if (ownerId === 'player') this.triggerVisibilityUpdate();
 
     return newEntity;
   }
@@ -574,9 +616,18 @@ export class WhiteboxEngine {
   killEntity(id: string) {
       const idx = this.entities.findIndex(e => e.id === id);
       if (idx !== -1) {
+          const e = this.entities[idx];
+          const hash = this.getHash(e.x, e.y, e.z);
+          
+          if (e.type === 'city') {
+              this.cityLookup.delete(hash);
+          } else {
+              this.unitLookup.delete(hash);
+          }
+          
           this.entities.splice(idx, 1);
       }
-      this.updateVisibility();
+      this.triggerVisibilityUpdate();
   }
 
   // --- Movement Logic ---
@@ -684,6 +735,16 @@ export class WhiteboxEngine {
     
     if (unit.ownerId !== this.currentTurnOwner) return false;
 
+    // Direct check for stacking (Friendly units block movement)
+    const targetOccupant = this.getUnitAt(x, y, z);
+    if (targetOccupant) {
+        if (targetOccupant.ownerId === unit.ownerId) {
+            // Friendly collision - invalid move
+            return false;
+        }
+        // Enemy collision is handled by validMoves detection below (results in attack)
+    }
+
     const validMoves = this.getValidMoves(unit);
     const targetMove = validMoves.find(m => m.x === x && m.y === y && m.z === z);
     
@@ -697,10 +758,18 @@ export class WhiteboxEngine {
         return true;
     }
 
+    // Update Cache
+    const oldHash = this.getHash(unit.x, unit.y, unit.z);
+    this.unitLookup.delete(oldHash);
+
     unit.x = x;
     unit.y = y;
     unit.z = z;
     unit.hasMoved = true;
+
+    // Set new Cache
+    const newHash = this.getHash(x, y, z);
+    this.unitLookup.set(newHash, unit);
 
     // Capture City
     const city = this.getCityAt(x, y, z);
@@ -717,11 +786,11 @@ export class WhiteboxEngine {
         
         // Update vision if player gained or lost a city
         if (unit.ownerId === 'player' || previousOwner === 'player') {
-             this.updateVisibility();
+             this.triggerVisibilityUpdate();
         }
     }
 
-    if (unit.ownerId === 'player') this.updateVisibility();
+    if (unit.ownerId === 'player') this.triggerVisibilityUpdate();
     this.emit('ENTITY_MOVED', { unit, x, y, z, type: 'move' });
     
     return true;
@@ -811,9 +880,19 @@ export class WhiteboxEngine {
       return z >= 0 && z < this.grid.length && y >= 0 && y < this.config.map.height && x >= 0 && x < this.config.map.width; 
   }
   
-  getEntityAt(x: number, y: number, z: number): Entity | undefined { return this.entities.find(e => e.x === x && e.y === y && e.z === z); }
-  getUnitAt(x: number, y: number, z: number): Entity | undefined { return this.entities.find(e => e.x === x && e.y === y && e.z === z && e.type !== 'city'); }
-  getCityAt(x: number, y: number, z: number): Entity | undefined { return this.entities.find(e => e.x === x && e.y === y && e.z === z && e.type === 'city'); }
+  // O(1) Lookups
+  getEntityAt(x: number, y: number, z: number): Entity | undefined { 
+      const hash = this.getHash(x, y, z);
+      return this.unitLookup.get(hash) || this.cityLookup.get(hash);
+  }
+  
+  getUnitAt(x: number, y: number, z: number): Entity | undefined { 
+      return this.unitLookup.get(this.getHash(x, y, z));
+  }
+  
+  getCityAt(x: number, y: number, z: number): Entity | undefined { 
+      return this.cityLookup.get(this.getHash(x, y, z));
+  }
   
   getTilesInRange(startX: number, startY: number, startZ: number, range: number): {x: number, y: number}[] {
     const results: {x: number, y: number}[] = [];

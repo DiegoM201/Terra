@@ -1,11 +1,9 @@
-import React, { useState, useEffect, CSSProperties, useRef } from 'react';
+import React, { useState, useEffect, CSSProperties, useRef, useCallback, useMemo } from 'react';
 import { WhiteboxEngine } from '../services/engine';
-import { GameConfig, TurnState, Entity, Tile, Visibility } from '../types';
+import { GameConfig, TurnState, Entity, Tile, Visibility, UnitDefinition } from '../types';
 import { DEFAULT_CONFIG, RESOURCE_ICONS, COLOR_PALETTE } from '../constants';
 
 // --- HEXAGONAL GEOMETRY CONFIGURATION ---
-// Standard "Pointy Topped" Hexagon Math
-// Source: https://www.redblobgames.com/grids/hexagons/
 const HEX_METRICS = {
     SIZE: 32, // Outer radius (center to corner)
     get WIDTH() { return Math.sqrt(3) * this.SIZE; }, // ~55.42px
@@ -15,7 +13,60 @@ const HEX_METRICS = {
     EXTRUSION: 16
 };
 
-// Procedural Assets
+// --- PROCEDURAL UNIT ASSETS ---
+
+const WarriorUnit = ({ color }: { color: string }) => (
+    <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md" style={{ filter: 'drop-shadow(0px 4px 2px rgba(0,0,0,0.5))' }}>
+        {/* Body */}
+        <path d="M50 20 C 30 20, 20 45, 20 65 L 20 90 L 80 90 L 80 65 C 80 45, 70 20, 50 20" fill={color} stroke="white" strokeWidth="3" />
+        {/* Helmet/Head */}
+        <circle cx="50" cy="30" r="15" fill="#e5e7eb" stroke="black" strokeWidth="1" />
+        <rect x="42" y="25" width="16" height="4" fill="#374151" />
+        {/* Sword */}
+        <path d="M85 30 L 70 80 L 75 80 L 90 30 Z" fill="#9ca3af" stroke="black" strokeWidth="1" transform="rotate(-15, 80, 80)" />
+        <line x1="82" y1="75" x2="68" y2="78" stroke="#4b5563" strokeWidth="3" transform="rotate(-15, 80, 80)" />
+        {/* Shield */}
+        <circle cx="35" cy="60" r="18" fill={color} stroke="#fcd34d" strokeWidth="3" />
+        <circle cx="35" cy="60" r="5" fill="#fcd34d" />
+    </svg>
+);
+
+const RiderUnit = ({ color }: { color: string }) => (
+    <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md" style={{ filter: 'drop-shadow(0px 4px 2px rgba(0,0,0,0.5))' }}>
+        {/* Horse Body */}
+        <path d="M20 70 Q 20 50 40 40 L 60 35 L 75 20 L 85 25 L 80 45 L 60 55 L 70 90 L 50 90 L 40 65 L 30 90 L 10 90 Z" fill="#78350f" stroke="black" strokeWidth="2" />
+        {/* Rider */}
+        <circle cx="50" cy="30" r="12" fill={color} stroke="white" strokeWidth="2" />
+        {/* Lance */}
+        <line x1="55" y1="35" x2="90" y2="10" stroke="#cbd5e1" strokeWidth="3" />
+    </svg>
+);
+
+const GiantUnit = ({ color }: { color: string }) => (
+    <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md" style={{ filter: 'drop-shadow(0px 4px 2px rgba(0,0,0,0.5))' }}>
+        {/* Bulky Body */}
+        <path d="M50 10 C 20 10, 10 40, 10 70 L 15 95 L 85 95 L 90 70 C 90 40, 80 10, 50 10" fill={color} stroke="black" strokeWidth="3" />
+        {/* Face */}
+        <rect x="35" y="30" width="30" height="20" rx="5" fill="#fca5a5" stroke="black" strokeWidth="1" />
+        <circle cx="42" cy="38" r="2" fill="black" />
+        <circle cx="58" cy="38" r="2" fill="black" />
+        {/* Club */}
+        <path d="M80 50 Q 95 20 90 10 Q 80 10 70 40 Z" fill="#573618" stroke="black" strokeWidth="2" />
+    </svg>
+);
+
+const DragonUnit = ({ color }: { color: string }) => (
+    <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md" style={{ filter: 'drop-shadow(0px 4px 2px rgba(0,0,0,0.5))' }}>
+        {/* Wings */}
+        <path d="M50 50 Q 10 10 5 40 Q 20 50 50 60 Z" fill="#a855f7" opacity="0.8" />
+        <path d="M50 50 Q 90 10 95 40 Q 80 50 50 60 Z" fill="#a855f7" opacity="0.8" />
+        {/* Body */}
+        <path d="M50 20 Q 60 40 50 80 L 40 90 L 60 90 L 50 80 Q 40 40 50 20" fill={color} stroke="white" strokeWidth="2" />
+        {/* Head */}
+        <path d="M45 25 L 50 10 L 55 25 Z" fill={color} stroke="white" strokeWidth="1" />
+    </svg>
+);
+
 const MeepleUnit = ({ color }: { color: string }) => (
     <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md" style={{ filter: 'drop-shadow(0px 4px 2px rgba(0,0,0,0.5))' }}>
         <path d="M50 15 C 30 15, 20 40, 20 60 L 20 90 L 80 90 L 80 60 C 80 40, 70 15, 50 15" fill={color} stroke="white" strokeWidth="3" />
@@ -23,7 +74,17 @@ const MeepleUnit = ({ color }: { color: string }) => (
     </svg>
 );
 
-const CityStructure = ({ color, level }: { color: string, level: number }) => (
+const UnitRenderer = React.memo(({ type, color }: { type: string, color: string }) => {
+    switch(type) {
+        case 'warrior': return <WarriorUnit color={color} />;
+        case 'rider': return <RiderUnit color={color} />;
+        case 'giant': return <GiantUnit color={color} />;
+        case 'dragon': return <DragonUnit color={color} />;
+        default: return <MeepleUnit color={color} />;
+    }
+});
+
+const CityStructure = React.memo(({ color, level }: { color: string, level: number }) => (
     <div className="relative w-full h-full flex items-end justify-center pb-1">
         <div className="flex flex-col items-center">
             <div className="w-0 h-0 border-l-[12px] border-l-transparent border-r-[12px] border-r-transparent border-b-[12px]" style={{ borderBottomColor: color }}></div>
@@ -34,22 +95,168 @@ const CityStructure = ({ color, level }: { color: string, level: number }) => (
             ))}
         </div>
     </div>
-);
+));
 
 // --- COORDINATE SYSTEM ---
 const getHexPosition = (col: number, row: number, z: number) => {
-    // Odd-r Offset Coordinate System (Pointy Top)
-    // Even rows are normal, Odd rows are shifted right by half width
     const offset = (row % 2) * 0.5;
-    
     const x = (col + offset) * HEX_METRICS.WIDTH;
     const y = row * HEX_METRICS.VERT_SPACING;
-    
-    // Z offset for layers (Sky layer floats above)
     const zOffset = z * -150;
-    
     return { x, y: y + zOffset };
 };
+
+// --- OPTIMIZED TILE COMPONENT ---
+interface HexTileProps {
+    tile: Tile;
+    layerIndex: number;
+    entity?: Entity;
+    structure?: Entity;
+    isValidMove: boolean;
+    isAttack: boolean;
+    isSelected: boolean;
+    isTileSelected: boolean;
+    isInteractive: boolean;
+    debugFogEnabled: boolean;
+    visibility: Visibility; // Explicit prop for Memo check
+    onClick: (x: number, y: number, z: number, e: React.MouseEvent) => void;
+}
+
+const HexTile = React.memo(({ 
+    tile, layerIndex, entity, structure, 
+    isValidMove, isAttack, isSelected, isTileSelected, 
+    isInteractive, debugFogEnabled, visibility, onClick 
+}: HexTileProps) => {
+    
+    // Position calculation is now relative to the map container (0,0), not screen
+    const pos = getHexPosition(tile.x, tile.y, layerIndex);
+    const zIndex = (tile.y * 100) + tile.x + (layerIndex * 10000);
+    
+    // We assume Void tiles are filtered out by parent
+
+    const visualEntity = entity || structure;
+    const unitDef = visualEntity ? DEFAULT_CONFIG.units[visualEntity.type] : null;
+
+    const isOwned = tile.ownerId !== undefined;
+    const isPlayerOwned = tile.ownerId === 'player';
+    
+    // Debug Fog Logic: Use the Prop, not the Object
+    let isHidden = visibility === Visibility.HIDDEN;
+    let isFogged = visibility === Visibility.FOGGED;
+    
+    if (!debugFogEnabled) {
+        isHidden = false;
+        isFogged = false;
+    }
+
+    let paletteKey = (layerIndex === 1 && tile.type === 'Ground') ? 'SkyGround' : tile.type;
+    if (isHidden) paletteKey = 'Cloud';
+
+    const colors = COLOR_PALETTE[paletteKey] || COLOR_PALETTE['Ground'];
+
+    const isMountain = tile.type === 'Mountain';
+    const isWater = tile.type === 'Water';
+    
+    const extrusion = (isMountain && !isHidden) ? HEX_METRICS.EXTRUSION * 1.5 : ((isWater && !isHidden) ? 4 : HEX_METRICS.EXTRUSION);
+    const cloudOffset = isHidden ? -16 : 0; 
+    
+    const opacity = isFogged ? 0.6 : 1;
+    const grayscale = isFogged ? 'grayscale(80%)' : 'none';
+
+    // Memoize the click handler to avoid passing a new arrow function every render if possible
+    // However, since we need to stopPropagation, we wrap it here. 
+    // Optimization: The parent passes the same 'onClick' reference, so this is cheap.
+    const handleClick = (e: React.MouseEvent) => {
+         e.stopPropagation(); 
+         if (isInteractive) onClick(tile.x, tile.y, tile.z, e);
+    };
+
+    return (
+        <div 
+            onClick={handleClick} 
+            style={{
+                position: 'absolute',
+                left: `${pos.x}px`,
+                top: `${pos.y}px`,
+                zIndex: zIndex,
+                width: `${HEX_METRICS.WIDTH}px`,
+                height: `${HEX_METRICS.HEIGHT + extrusion}px`, 
+                cursor: (isInteractive && !isHidden) ? 'pointer' : 'default',
+                transition: 'transform 0.1s', // Faster transition
+                transform: (isSelected || isTileSelected) ? 'translateY(-8px)' : `translateY(${cloudOffset}px)`,
+                filter: grayscale,
+                opacity: opacity
+            }}
+        >
+                {/* TOP FACE */}
+                <div style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: HEX_METRICS.WIDTH,
+                    height: HEX_METRICS.HEIGHT,
+                    backgroundColor: colors.top,
+                    clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)',
+                    zIndex: 10
+                }}>
+                {isOwned && !isHidden && (
+                    <div className={`absolute inset-0 border-[6px] opacity-40 ${isPlayerOwned ? 'border-blue-300' : 'border-red-500'}`} style={{ clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)' }}></div>
+                )}
+                {(isSelected || isTileSelected) && (
+                    <div className="absolute inset-0 border-[4px] border-yellow-300 animate-pulse z-20" style={{ clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)' }}></div>
+                )}
+                </div>
+
+                {/* EXTRUSION */}
+                <div style={{
+                    position: 'absolute',
+                    top: extrusion, 
+                    left: 0,
+                    width: HEX_METRICS.WIDTH,
+                    height: HEX_METRICS.HEIGHT,
+                    backgroundColor: colors.right,
+                    clipPath: 'polygon(50% 100%, 100% 75%, 100% 25%, 50% 50%, 0% 25%, 0% 75%)', 
+                    zIndex: 4,
+                    filter: 'brightness(0.7)'
+                }}></div>
+                
+                {/* DECOR / UNITS */}
+                {!isHidden && (
+                <div className="absolute w-full h-full flex justify-center items-center pointer-events-none z-20" style={{ top: -extrusion }}>
+                        {isValidMove && !isAttack && (
+                            <div className="w-4 h-4 rounded-full bg-emerald-400 animate-pulse mt-8 shadow-[0_0_10px_#34d399] z-50"></div>
+                        )}
+                        {isValidMove && isAttack && (
+                            <div className="w-10 h-10 border-4 border-red-500 rounded-full animate-ping opacity-40 mt-8 z-50"></div>
+                        )}
+
+                        {tile.resource && !visualEntity && (
+                            <div className="text-2xl mt-4 drop-shadow-md">{RESOURCE_ICONS[tile.resource]}</div>
+                        )}
+                        {tile.improvement && !visualEntity && (
+                            <div className="text-2xl mt-4 drop-shadow-md">{DEFAULT_CONFIG.improvements[tile.improvement].symbol}</div>
+                        )}
+
+                        {structure && (
+                            <div className="w-16 h-20 mt-[-10px]">
+                                <CityStructure color={unitDef?.color || '#ccc'} level={structure.components['CityStats']?.level || 1} />
+                            </div>
+                        )}
+
+                        {/* Show Units if VISIBLE. If FOGGED, units are hidden unless they are static structures which handled above */}
+                        {entity && unitDef && !isFogged && (
+                            <div className="w-12 h-12 mt-0 relative hover:scale-110 transition-transform origin-bottom">
+                                <UnitRenderer type={entity.type} color={unitDef.color} />
+                                <div className="absolute -top-2 left-2 w-8 h-1 bg-gray-700 border border-black">
+                                    <div className="h-full bg-green-500" style={{ width: `${(entity.components['Health']?.current / entity.components['Health']?.max) * 100}%`}}></div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+        </div>
+    );
+});
 
 export const PrototypeView: React.FC = () => {
   const [engine, setEngine] = useState<WhiteboxEngine>(() => new WhiteboxEngine(DEFAULT_CONFIG));
@@ -68,31 +275,94 @@ export const PrototypeView: React.FC = () => {
   const [viewLayer, setViewLayer] = useState(0); 
   const [, forceUpdate] = useState({});
   const [cityTab, setCityTab] = useState<'units' | 'buildings' | 'queue'>('units');
-  
-  // Centering logic
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [viewOffset, setViewOffset] = useState({ x: 0, y: 0 });
+  const [debugFogEnabled, setDebugFogEnabled] = useState(true);
 
-  // Calculate center of grid based on HEX_METRICS
+  // --- CAMERA STATE ---
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [camera, setCamera] = useState({ x: 0, y: 0, zoom: 1 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
+
+  // Center camera initially or when map size changes
   useEffect(() => {
       if (containerRef.current) {
           const { clientWidth, clientHeight } = containerRef.current;
+          const mapWidth = (engine.config.map.width * HEX_METRICS.WIDTH);
+          const mapHeight = (engine.config.map.height * HEX_METRICS.VERT_SPACING);
           
-          const cols = engine.config.map.width;
-          const rows = engine.config.map.height;
-          
-          // Total Width = (cols * width) + (0.5 width for the offset on odd rows)
-          const mapWidth = (cols * HEX_METRICS.WIDTH) + (HEX_METRICS.WIDTH * 0.5);
-          
-          // Total Height = (rows * vert_spacing) + (approx 0.25 height for the bottom tips)
-          const mapHeight = (rows * HEX_METRICS.VERT_SPACING) + (HEX_METRICS.HEIGHT * 0.25);
-          
-          const offsetX = (clientWidth / 2) - (mapWidth / 2);
-          const offsetY = (clientHeight / 2) - (mapHeight / 2);
-          
-          setViewOffset({ x: offsetX, y: offsetY });
+          setCamera({
+              x: (clientWidth / 2) - (mapWidth / 2),
+              y: (clientHeight / 2) - (mapHeight / 2),
+              zoom: 1
+          });
       }
-  }, [engine.config.map.width, engine.config.map.height]);
+  }, [engine, engine.config.map.width, engine.config.map.height]);
+
+  // --- CAMERA INPUT HANDLERS ---
+  const handleWheel = (e: React.WheelEvent) => {
+      const scaleSpeed = 0.001;
+      const newZoom = Math.min(Math.max(0.2, camera.zoom - e.deltaY * scaleSpeed), 3.0);
+      setCamera(prev => ({ ...prev, zoom: newZoom }));
+  };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+      setIsDragging(true);
+      setLastMousePos({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+      if (!isDragging) return;
+      const dx = e.clientX - lastMousePos.x;
+      const dy = e.clientY - lastMousePos.y;
+      setCamera(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+      setLastMousePos({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleMouseUp = () => setIsDragging(false);
+
+  // --- PERFORMANCE: MEMOIZED LOOKUPS ---
+
+  // 1. Map of Entities (O(1) access inside render loop)
+  const unitMap = useMemo(() => {
+    const map = new Map<string, Entity>();
+    entities.forEach(e => {
+        if (e.type !== 'city') map.set(`${e.x},${e.y},${e.z}`, e);
+    });
+    return map;
+  }, [entities]);
+
+  const structureMap = useMemo(() => {
+      const map = new Map<string, Entity>();
+      entities.forEach(e => {
+          if (e.type === 'city') map.set(`${e.x},${e.y},${e.z}`, e);
+      });
+      return map;
+  }, [entities]);
+
+  // 2. Set of Valid Moves (O(1) access inside render loop)
+  const validMoveMap = useMemo(() => {
+      const map = new Map<string, {x: number, y: number, z: number, isAttack?: boolean}>();
+      validMoves.forEach(m => {
+          map.set(`${m.x},${m.y},${m.z}`, m);
+      });
+      return map;
+  }, [validMoves]);
+
+  // 3. Flattened and Sorted Tiles (Avoids Array.flat().sort() every frame)
+  // We compute this only when the grid itself changes (Regen/Init), not on hover/selection
+  const visibleTiles = useMemo(() => {
+      const layers = [0, 1]; // Supports z0 and z1
+      const result: Record<number, Tile[]> = {0: [], 1: []};
+      
+      layers.forEach(z => {
+          // Filter out Void tiles immediately
+          const flat = engine.grid[z].flat().filter(t => t.type !== 'Void');
+          // Sort for Painter's Algorithm (Y asc, X asc)
+          flat.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+          result[z] = flat;
+      });
+      return result;
+  }, [engine.grid]); // Dependency is the raw grid array
 
   const addLog = (msg: string) => {
     setLogs(prev => [`[T${engine.turnNumber}] ${msg}`, ...prev.slice(0, 9)]);
@@ -100,7 +370,7 @@ export const PrototypeView: React.FC = () => {
 
   useEffect(() => {
     const onGridGenerated = (payload: any) => {
-        addLog(`EVENT: Grid Generated (Seed: ${payload.seed})`);
+        addLog(`EVENT: Grid Generated (Seed: ${payload.seed}, Size: ${payload.width}x${payload.height})`);
         setEntities([...engine.entities]);
         setPlayerState({...engine.playerState});
         deselectAll();
@@ -163,16 +433,22 @@ export const PrototypeView: React.FC = () => {
       setCityTab('units');
   }
 
-  const handleTileClick = (x: number, y: number, z: number, e: React.MouseEvent) => {
+  // Memoized Handler for Tile Clicks
+  const handleTileClick = useCallback((x: number, y: number, z: number, e: React.MouseEvent) => {
     if (showTechTree) return;
     if (currentOwner !== 'player') return;
 
     const tile = engine.grid[z][y][x];
-    if (tile.visibility === Visibility.HIDDEN) return; 
-
-    if (tile.visibility !== Visibility.VISIBLE) {
-        addLog("Cannot target into Fog.");
-        return;
+    
+    // Debug Fog check
+    if (!debugFogEnabled) {
+       // Allow click
+    } else {
+        if (tile.visibility === Visibility.HIDDEN) return; 
+        if (tile.visibility !== Visibility.VISIBLE) {
+            addLog("Cannot target into Fog.");
+            return;
+        }
     }
     
     if (tile.type === 'Void' && !selectedEntityId) return;
@@ -181,6 +457,8 @@ export const PrototypeView: React.FC = () => {
     const clickedCity = engine.getCityAt(x, y, z);
 
     if (selectedEntityId) {
+       // Optimized lookup using the generic getValidMoves which returns Array, 
+       // but here we check against our local state.
        const targetMove = validMoves.find(vm => vm.x === x && vm.y === y && vm.z === z);
        if (targetMove) {
           engine.moveUnitTo(selectedEntityId, x, y, z);
@@ -216,7 +494,7 @@ export const PrototypeView: React.FC = () => {
     } else {
        deselectAll();
     }
-  };
+  }, [engine, showTechTree, currentOwner, selectedEntityId, validMoves, debugFogEnabled]); // Deps
 
   const selectUnit = (unit: Entity) => {
       deselectAll();
@@ -254,7 +532,11 @@ export const PrototypeView: React.FC = () => {
 
   const handleEndTurn = () => engine.endTurn();
   const handleResearch = (techId: string) => engine.researchTech(techId);
-  const handleRegenerate = () => {
+  const handleRegenerate = (size?: number) => {
+      if (size) {
+          engine.config.map.width = size;
+          engine.config.map.height = size;
+      }
       engine.config.map.noiseSeed += 123;
       engine.generateGrid();
       setTurnNumber(1);
@@ -277,153 +559,49 @@ export const PrototypeView: React.FC = () => {
   const techList = Object.values(DEFAULT_CONFIG.techs);
   const selectedTile = selectedTilePos ? engine.grid[selectedTilePos.z][selectedTilePos.y][selectedTilePos.x] : null;
 
+  // Optimized Render Layer with Memoized Components
   const renderGridLayer = (layerIndex: number, isInteractive: boolean) => {
-      const flattenedTiles = engine.grid[layerIndex].flat();
-      // Sort by Y first (back to front), then X for correct painter's algorithm on hexes
-      flattenedTiles.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+      // Use the pre-sorted, pre-filtered list
+      const tilesToRender = visibleTiles[layerIndex];
 
       return (
-        <div className="absolute top-0 left-0 w-full h-full">
-            {flattenedTiles.map((tile) => {
-                const pos = getHexPosition(tile.x, tile.y, layerIndex);
-                // Apply global centering
-                const left = pos.x + viewOffset.x;
-                const top = pos.y + viewOffset.y;
+        <div style={{
+            width: '100%', height: '100%', position: 'absolute',
+            // GPU Accelerated Transform for entire layer
+            transform: `translate3d(${camera.x}px, ${camera.y}px, 0) scale(${camera.zoom})`,
+            transformOrigin: '0 0',
+            transition: isDragging ? 'none' : 'transform 0.1s ease-out',
+            pointerEvents: isInteractive ? 'auto' : 'none'
+        }}>
+            {tilesToRender.map((tile) => {
+                const key = `${tile.x},${tile.y},${layerIndex}`;
                 
-                // Z Index Logic: Lower rows must be in front of upper rows. 
-                // X helps with tie-breaking within row
-                const zIndex = (tile.y * 100) + tile.x + (layerIndex * 10000);
-
-                const entity = entities.find(e => e.x === tile.x && e.y === tile.y && e.z === tile.z && e.type !== 'city'); 
-                const structure = entities.find(e => e.x === tile.x && e.y === tile.y && e.z === tile.z && e.type === 'city');
-                const visualEntity = entity || structure;
-                const unitDef = visualEntity ? DEFAULT_CONFIG.units[visualEntity.type] : null;
-
-                const isOwned = tile.ownerId !== undefined;
-                const isPlayerOwned = tile.ownerId === 'player';
-                const isHidden = tile.visibility === Visibility.HIDDEN && tile.type !== 'Void';
+                // O(1) Lookups
+                const entity = unitMap.get(key);
+                const structure = structureMap.get(key);
+                const targetMove = isInteractive ? validMoveMap.get(key) : undefined;
                 
-                const targetMove = isInteractive ? validMoves.find(m => m.x === tile.x && m.y === tile.y && m.z === layerIndex) : null;
                 const isValidMove = !!targetMove;
-                const isAttack = targetMove?.isAttack;
+                const isAttack = targetMove?.isAttack || false;
                 const isSelected = isInteractive && ((entity && entity.id === selectedEntityId) || (structure && structure.id === selectedCityId));
                 const isTileSelected = isInteractive && selectedTilePos?.x === tile.x && selectedTilePos?.y === tile.y && selectedTilePos?.z === tile.z;
                 
-                if (tile.type === 'Void') return null;
-                
-                let paletteKey = (layerIndex === 1 && tile.type === 'Ground') ? 'SkyGround' : tile.type;
-                if (isHidden) paletteKey = 'Cloud';
-                
-                const colors = COLOR_PALETTE[paletteKey] || COLOR_PALETTE['Ground'];
-
-                // Variable Heights
-                const isMountain = tile.type === 'Mountain';
-                const isWater = tile.type === 'Water';
-                
-                const extrusion = (isMountain && !isHidden) ? HEX_METRICS.EXTRUSION * 1.5 : ((isWater && !isHidden) ? 4 : HEX_METRICS.EXTRUSION);
-                
-                const isCloud = isHidden;
-                const cloudOffset = isCloud ? -16 : 0; 
-                
-                const isFogged = tile.visibility === Visibility.FOGGED;
-                const opacity = isFogged ? 0.6 : 1;
-                const grayscale = isFogged ? 'grayscale(80%)' : 'none';
-
                 return (
-                    <div 
-                        key={`${tile.x}-${tile.y}-${tile.z}`}
-                        onClick={(e) => isInteractive && handleTileClick(tile.x, tile.y, tile.z, e)} 
-                        style={{
-                            position: 'absolute',
-                            left: `${left}px`,
-                            top: `${top}px`,
-                            zIndex: zIndex,
-                            width: `${HEX_METRICS.WIDTH}px`,
-                            height: `${HEX_METRICS.HEIGHT + extrusion}px`, 
-                            cursor: (isInteractive && !isHidden) ? 'pointer' : 'default',
-                            transition: 'transform 0.2s',
-                            transform: (isSelected || isTileSelected) ? 'translateY(-8px)' : `translateY(${cloudOffset}px)`,
-                            filter: grayscale,
-                            opacity: opacity
-                        }}
-                    >
-                         {/* TOP FACE (Hexagon) */}
-                         <div style={{
-                             position: 'absolute',
-                             top: 0,
-                             left: 0,
-                             width: HEX_METRICS.WIDTH,
-                             height: HEX_METRICS.HEIGHT,
-                             backgroundColor: colors.top,
-                             // Pointy Top Hexagon Clip Path
-                             clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)',
-                             zIndex: 10
-                         }}>
-                            {/* Border / Highlight for Owner */}
-                            {isOwned && !isHidden && (
-                                <div className={`absolute inset-0 border-[6px] opacity-40 ${isPlayerOwned ? 'border-blue-300' : 'border-red-500'}`} style={{ clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)' }}></div>
-                            )}
-                            {/* Selection Ring */}
-                            {(isSelected || isTileSelected) && (
-                                <div className="absolute inset-0 border-[4px] border-yellow-300 animate-pulse z-20" style={{ clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)' }}></div>
-                            )}
-                         </div>
-
-                         {/* SIDE FACES (Extrusion) - Simplified 3D look for Hex */}
-                         
-                         {/* Generic Extrusion Background (The "Block") */}
-                         <div style={{
-                             position: 'absolute',
-                             top: extrusion, 
-                             left: 0,
-                             width: HEX_METRICS.WIDTH,
-                             height: HEX_METRICS.HEIGHT,
-                             backgroundColor: colors.right,
-                             // Shows bottom 3 faces of the hexagonal prism
-                             clipPath: 'polygon(50% 100%, 100% 75%, 100% 25%, 50% 50%, 0% 25%, 0% 75%)', 
-                             zIndex: 4,
-                             filter: 'brightness(0.7)'
-                         }}></div>
-                         
-                         {/* DECOR / UNITS (Floating Above) */}
-                         {!isHidden && (
-                            <div className="absolute w-full h-full flex justify-center items-center pointer-events-none z-20" style={{ top: -extrusion }}>
-                                  {/* Valid Move Indicator */}
-                                  {isValidMove && !isAttack && (
-                                      <div className="w-4 h-4 rounded-full bg-emerald-400 animate-pulse mt-8 shadow-[0_0_10px_#34d399] z-50"></div>
-                                  )}
-                                  {isValidMove && isAttack && (
-                                      <div className="w-10 h-10 border-4 border-red-500 rounded-full animate-ping opacity-40 mt-8 z-50"></div>
-                                  )}
-
-                                  {/* Resource */}
-                                  {tile.resource && !visualEntity && (
-                                      <div className="text-2xl mt-4 drop-shadow-md">{RESOURCE_ICONS[tile.resource]}</div>
-                                  )}
-                                  {tile.improvement && !visualEntity && (
-                                      <div className="text-2xl mt-4 drop-shadow-md">{DEFAULT_CONFIG.improvements[tile.improvement].symbol}</div>
-                                  )}
-
-                                  {/* Structures */}
-                                  {structure && (
-                                      <div className="w-16 h-20 mt-[-10px]">
-                                          <CityStructure color={unitDef?.color || '#ccc'} level={structure.components['CityStats']?.level || 1} />
-                                      </div>
-                                  )}
-
-                                  {/* Units */}
-                                  {entity && unitDef && (
-                                      <div className="w-12 h-12 mt-0 relative hover:scale-110 transition-transform origin-bottom">
-                                           <MeepleUnit color={unitDef.color} />
-                                           <div className="absolute -top-2 left-2 w-8 h-1 bg-gray-700 border border-black">
-                                                <div className="h-full bg-green-500" style={{ width: `${(entity.components['Health']?.current / entity.components['Health']?.max) * 100}%`}}></div>
-                                           </div>
-                                      </div>
-                                  )}
-                             </div>
-                         )}
-
-                    </div>
+                    <HexTile 
+                        key={key}
+                        tile={tile}
+                        layerIndex={layerIndex}
+                        entity={entity}
+                        structure={structure}
+                        isValidMove={isValidMove}
+                        isAttack={isAttack}
+                        isSelected={!!isSelected}
+                        isTileSelected={!!isTileSelected}
+                        isInteractive={isInteractive}
+                        debugFogEnabled={debugFogEnabled}
+                        visibility={tile.visibility} // CRITICAL: Pass primitive value for memo check
+                        onClick={handleTileClick}
+                    />
                 );
             })}
         </div>
@@ -458,6 +636,9 @@ export const PrototypeView: React.FC = () => {
         </div>
         
         <div className="flex items-center space-x-4">
+          <button onClick={() => setDebugFogEnabled(!debugFogEnabled)} className={`px-3 py-1 text-xs font-bold rounded border ${debugFogEnabled ? 'bg-gray-700 text-gray-300 border-gray-500' : 'bg-yellow-900/50 text-yellow-500 border-yellow-500'}`}>
+              Fog: {debugFogEnabled ? 'ON' : 'OFF'}
+          </button>
           <button onClick={() => setShowTechTree(true)} className="px-4 py-3 bg-purple-700 hover:bg-purple-600 text-white font-bold rounded shadow-lg flex items-center">
              <span className="mr-2">🔬</span> Tech
           </button>
@@ -468,8 +649,26 @@ export const PrototypeView: React.FC = () => {
         </div>
       </div>
 
-      <div className="flex flex-1 overflow-hidden relative bg-gray-950" ref={containerRef}>
-         <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,#1e293b_0%,#0f172a_100%)] opacity-50 pointer-events-none"></div>
+      {/* Main Viewport */}
+      <div 
+        className="flex flex-1 overflow-hidden relative bg-gray-950 cursor-move" 
+        ref={containerRef}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+      >
+         {/* Parallax Background */}
+         <div 
+            className="absolute inset-0 bg-[radial-gradient(circle_at_center,#1e293b_0%,#0f172a_100%)] pointer-events-none"
+            style={{
+                backgroundSize: '100px 100px',
+                backgroundImage: 'radial-gradient(circle, #334155 1px, transparent 1px)',
+                backgroundPosition: `${camera.x * 0.5}px ${camera.y * 0.5}px`, // Parallax movement
+                opacity: 0.3
+            }}
+         ></div>
             
          {/* The Isometric Container */}
          <div className="relative w-full h-full">
@@ -477,8 +676,12 @@ export const PrototypeView: React.FC = () => {
                <>
                   {renderGridLayer(0, true)}
                   {/* Ghost Sky */}
-                  <div style={{ opacity: 0.2, filter: 'blur(4px)', transform: 'translateY(-120px)' }}>
-                     {renderGridLayer(1, false)}
+                  <div style={{ opacity: 0.2, filter: 'blur(4px)', transform: `translate3d(${camera.x}px, ${camera.y - 120 * camera.zoom}px, 0) scale(${camera.zoom})`, pointerEvents: 'none' }}>
+                       {/* Ghosting only needs to show non-void tiles, reusing our optimized list but needing simple render */}
+                       {visibleTiles[1].map(t => {
+                           const p = getHexPosition(t.x, t.y, 1);
+                           return <div key={`${t.x}-${t.y}`} style={{ position: 'absolute', left: p.x, top: p.y, width: HEX_METRICS.WIDTH, height: HEX_METRICS.HEIGHT, background: '#fff', opacity: 0.2, clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)' }}></div>
+                       })}
                   </div>
                </>
             )}
@@ -492,9 +695,16 @@ export const PrototypeView: React.FC = () => {
             )}
          </div>
 
+         {/* UI Controls for Camera */}
+         <div className="absolute bottom-6 right-6 flex flex-col space-y-2 z-50">
+             <button onClick={() => setCamera(prev => ({...prev, zoom: Math.min(prev.zoom + 0.2, 2.5)}))} className="w-10 h-10 bg-gray-800 border border-gray-600 rounded-full flex items-center justify-center text-white font-bold hover:bg-gray-700">+</button>
+             <button onClick={() => setCamera(prev => ({...prev, zoom: Math.max(prev.zoom - 0.2, 0.5)}))} className="w-10 h-10 bg-gray-800 border border-gray-600 rounded-full flex items-center justify-center text-white font-bold hover:bg-gray-700">-</button>
+             <button onClick={() => setCamera({x: 0, y: 0, zoom: 1})} className="w-10 h-10 bg-gray-800 border border-gray-600 rounded-full flex items-center justify-center text-white font-bold hover:bg-gray-700 text-xs">Rst</button>
+         </div>
+
          {/* UI Overlays (City, Tech, etc.) - Unchanged logic, just keeping structure */}
          {selectedCity && !showTechTree && (
-            <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 bg-gray-800 border border-gray-600 rounded-lg shadow-2xl p-4 w-96 z-40 animate-in slide-in-from-bottom-5">
+            <div className="absolute bottom-6 left-6 bg-gray-800 border border-gray-600 rounded-lg shadow-2xl p-4 w-96 z-40 animate-in slide-in-from-bottom-5">
                <div className="flex justify-between items-start mb-4 border-b border-gray-700 pb-2">
                    <div><h2 className="text-xl font-bold text-white flex items-center">🏰 {selectedCity.name} <span className="ml-2 text-xs bg-yellow-500 text-black px-1.5 rounded">Lvl {selectedCity.components['CityStats']?.level || 1}</span></h2><span className="text-xs text-gray-500">Population: {selectedCity.components['CityStats']?.population || 0}</span></div>
                    <button onClick={() => setSelectedCityId(null)} className="text-gray-400 hover:text-white">✕</button>
@@ -540,7 +750,7 @@ export const PrototypeView: React.FC = () => {
             </div>
          )}
          {selectedTile && !showTechTree && (
-            <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 bg-gray-800 border border-gray-600 rounded-lg shadow-2xl p-4 w-96 z-40 animate-in slide-in-from-bottom-5">
+            <div className="absolute bottom-6 left-6 bg-gray-800 border border-gray-600 rounded-lg shadow-2xl p-4 w-96 z-40 animate-in slide-in-from-bottom-5">
                 <div className="flex justify-between items-start mb-4 border-b border-gray-700 pb-2"><div><h2 className="text-lg font-bold text-white flex items-center">Terrain: {selectedTile.type}</h2><span className="text-xs text-gray-400">Position: {selectedTile.x}, {selectedTile.y}</span></div><button onClick={() => setSelectedTilePos(null)} className="text-gray-400 hover:text-white">✕</button></div>
                 {selectedTile.resource && <div className="mb-4 bg-gray-700/30 p-2 rounded flex items-center"><span className="text-2xl mr-2">{RESOURCE_ICONS[selectedTile.resource]}</span><span className="font-bold capitalize">{selectedTile.resource}</span></div>}
                {!selectedTile.improvement ? (
@@ -563,7 +773,39 @@ export const PrototypeView: React.FC = () => {
                </div>
             </div>
         )}
-        <div className="w-72 bg-gray-800 border-l border-gray-700 p-4 flex flex-col z-10"><div className="flex justify-between items-center mb-4"><h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Mission Log</h3><div className="flex space-x-2"><button onClick={handleRegenerate} className="text-xs text-blue-400 hover:text-blue-300">Regen</button><button onClick={handleReset} className="text-xs text-red-400 hover:text-red-300">Reset</button></div></div><div className="flex-1 overflow-y-auto space-y-2 font-mono text-xs">{logs.map((log, i) => (<div key={i} className="text-gray-400 border-b border-gray-700/50 pb-1 last:border-0"><span className="text-blue-500 mr-1">::</span>{log}</div>))}</div></div>
+        <div className="w-72 bg-gray-800 border-l border-gray-700 p-4 flex flex-col z-10">
+            <div className="flex justify-between items-center mb-4">
+                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Mission Log</h3>
+                <div className="flex space-x-2">
+                    <button onClick={() => handleRegenerate()} className="text-xs text-blue-400 hover:text-blue-300">Regen</button>
+                    <button onClick={handleReset} className="text-xs text-red-400 hover:text-red-300">Reset</button>
+                </div>
+            </div>
+            
+            {/* Map Size Selector */}
+            <div className="mb-4">
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 block">Map Size</label>
+                <div className="grid grid-cols-4 gap-2">
+                    {[10, 16, 24, 32].map(size => (
+                    <button 
+                        key={size}
+                        onClick={() => handleRegenerate(size)}
+                        className={`px-1 py-1 text-[10px] font-bold rounded border transition-colors ${engine.config.map.width === size ? 'bg-blue-600 text-white border-blue-500' : 'bg-gray-800 text-gray-400 border-gray-600 hover:bg-gray-700 hover:text-gray-200'}`}
+                    >
+                        {size}x{size}
+                    </button>
+                    ))}
+                </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-2 font-mono text-xs">
+                {logs.map((log, i) => (
+                    <div key={i} className="text-gray-400 border-b border-gray-700/50 pb-1 last:border-0">
+                        <span className="text-blue-500 mr-1">::</span>{log}
+                    </div>
+                ))}
+            </div>
+        </div>
       </div>
     </div>
   );
