@@ -1,0 +1,570 @@
+import React, { useState, useEffect, CSSProperties, useRef } from 'react';
+import { WhiteboxEngine } from '../services/engine';
+import { GameConfig, TurnState, Entity, Tile, Visibility } from '../types';
+import { DEFAULT_CONFIG, RESOURCE_ICONS, COLOR_PALETTE } from '../constants';
+
+// --- HEXAGONAL GEOMETRY CONFIGURATION ---
+// Standard "Pointy Topped" Hexagon Math
+// Source: https://www.redblobgames.com/grids/hexagons/
+const HEX_METRICS = {
+    SIZE: 32, // Outer radius (center to corner)
+    get WIDTH() { return Math.sqrt(3) * this.SIZE; }, // ~55.42px
+    get HEIGHT() { return 2 * this.SIZE; }, // 64px
+    get HORIZ_SPACING() { return this.WIDTH; },
+    get VERT_SPACING() { return this.HEIGHT * 0.75; }, // 3/4 height overlap
+    EXTRUSION: 16
+};
+
+// Procedural Assets
+const MeepleUnit = ({ color }: { color: string }) => (
+    <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md" style={{ filter: 'drop-shadow(0px 4px 2px rgba(0,0,0,0.5))' }}>
+        <path d="M50 15 C 30 15, 20 40, 20 60 L 20 90 L 80 90 L 80 60 C 80 40, 70 15, 50 15" fill={color} stroke="white" strokeWidth="3" />
+        <circle cx="50" cy="30" r="15" fill="#ffe4c4" stroke="black" strokeWidth="1" />
+    </svg>
+);
+
+const CityStructure = ({ color, level }: { color: string, level: number }) => (
+    <div className="relative w-full h-full flex items-end justify-center pb-1">
+        <div className="flex flex-col items-center">
+            <div className="w-0 h-0 border-l-[12px] border-l-transparent border-r-[12px] border-r-transparent border-b-[12px]" style={{ borderBottomColor: color }}></div>
+            {Array.from({length: level}).map((_, i) => (
+                <div key={i} className="w-6 h-5 bg-gray-200 border border-gray-400 shadow-sm relative z-10 flex items-center justify-center">
+                    <div className="w-1.5 h-2.5 bg-black/50"></div>
+                </div>
+            ))}
+        </div>
+    </div>
+);
+
+// --- COORDINATE SYSTEM ---
+const getHexPosition = (col: number, row: number, z: number) => {
+    // Odd-r Offset Coordinate System (Pointy Top)
+    // Even rows are normal, Odd rows are shifted right by half width
+    const offset = (row % 2) * 0.5;
+    
+    const x = (col + offset) * HEX_METRICS.WIDTH;
+    const y = row * HEX_METRICS.VERT_SPACING;
+    
+    // Z offset for layers (Sky layer floats above)
+    const zOffset = z * -150;
+    
+    return { x, y: y + zOffset };
+};
+
+export const PrototypeView: React.FC = () => {
+  const [engine, setEngine] = useState<WhiteboxEngine>(() => new WhiteboxEngine(DEFAULT_CONFIG));
+  const [turnNumber, setTurnNumber] = useState(1);
+  const [currentOwner, setCurrentOwner] = useState('player');
+  const [playerState, setPlayerState] = useState(engine.playerState);
+  const [entities, setEntities] = useState<Entity[]>(engine.entities);
+  
+  const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
+  const [selectedCityId, setSelectedCityId] = useState<string | null>(null);
+  const [selectedTilePos, setSelectedTilePos] = useState<{x: number, y: number, z: number} | null>(null);
+  const [validMoves, setValidMoves] = useState<{x: number, y: number, z: number, isAttack?: boolean}[]>([]);
+  
+  const [logs, setLogs] = useState<string[]>(['System initialized.', 'Capital City founded.']);
+  const [showTechTree, setShowTechTree] = useState(false);
+  const [viewLayer, setViewLayer] = useState(0); 
+  const [, forceUpdate] = useState({});
+  const [cityTab, setCityTab] = useState<'units' | 'buildings' | 'queue'>('units');
+  
+  // Centering logic
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [viewOffset, setViewOffset] = useState({ x: 0, y: 0 });
+
+  // Calculate center of grid based on HEX_METRICS
+  useEffect(() => {
+      if (containerRef.current) {
+          const { clientWidth, clientHeight } = containerRef.current;
+          
+          const cols = engine.config.map.width;
+          const rows = engine.config.map.height;
+          
+          // Total Width = (cols * width) + (0.5 width for the offset on odd rows)
+          const mapWidth = (cols * HEX_METRICS.WIDTH) + (HEX_METRICS.WIDTH * 0.5);
+          
+          // Total Height = (rows * vert_spacing) + (approx 0.25 height for the bottom tips)
+          const mapHeight = (rows * HEX_METRICS.VERT_SPACING) + (HEX_METRICS.HEIGHT * 0.25);
+          
+          const offsetX = (clientWidth / 2) - (mapWidth / 2);
+          const offsetY = (clientHeight / 2) - (mapHeight / 2);
+          
+          setViewOffset({ x: offsetX, y: offsetY });
+      }
+  }, [engine.config.map.width, engine.config.map.height]);
+
+  const addLog = (msg: string) => {
+    setLogs(prev => [`[T${engine.turnNumber}] ${msg}`, ...prev.slice(0, 9)]);
+  };
+
+  useEffect(() => {
+    const onGridGenerated = (payload: any) => {
+        addLog(`EVENT: Grid Generated (Seed: ${payload.seed})`);
+        setEntities([...engine.entities]);
+        setPlayerState({...engine.playerState});
+        deselectAll();
+        forceUpdate({});
+    };
+
+    const onEconomyUpdate = (state: any) => {
+        if (state === engine.playerState) setPlayerState({...state});
+    };
+
+    const onTurnChanged = (payload: any) => {
+        setTurnNumber(payload.turn);
+        setCurrentOwner(payload.owner);
+        deselectAll();
+        if (payload.owner === 'player') addLog("Your Turn.");
+        else addLog("Enemy Turn...");
+        forceUpdate({}); 
+    };
+
+    const onFogUpdate = () => forceUpdate({});
+    const onEntityMoved = () => forceUpdate({});
+    const onCityUpdated = () => forceUpdate({});
+    const onTileUpdated = () => forceUpdate({});
+    const onCombatLog = (payload: any) => {
+        if (payload.type === 'attack') addLog(`⚔️ ${payload.attacker.type} hit ${payload.defender.type} for ${payload.damage} dmg!`);
+        else if (payload.type === 'retaliation') addLog(`🛡️ ${payload.attacker.type} retaliated for ${payload.damage} dmg!`);
+        else if (payload.type === 'death') {
+             addLog(`💀 ${payload.defender.type} was destroyed!`);
+             setEntities([...engine.entities]); 
+             if (selectedEntityId === payload.defender.id) deselectAll();
+        }
+    };
+
+    engine.on('GRID_GENERATED', onGridGenerated);
+    engine.on('ECONOMY_UPDATE', onEconomyUpdate);
+    engine.on('TURN_CHANGED', onTurnChanged);
+    engine.on('FOG_UPDATE', onFogUpdate);
+    engine.on('ENTITY_MOVED', onEntityMoved);
+    engine.on('CITY_UPDATED', onCityUpdated);
+    engine.on('TILE_UPDATED', onTileUpdated);
+    engine.on('COMBAT_LOG', onCombatLog);
+
+    return () => {
+        engine.off('GRID_GENERATED', onGridGenerated);
+        engine.off('ECONOMY_UPDATE', onEconomyUpdate);
+        engine.off('TURN_CHANGED', onTurnChanged);
+        engine.off('FOG_UPDATE', onFogUpdate);
+        engine.off('ENTITY_MOVED', onEntityMoved);
+        engine.off('CITY_UPDATED', onCityUpdated);
+        engine.off('TILE_UPDATED', onTileUpdated);
+        engine.off('COMBAT_LOG', onCombatLog);
+    };
+  }, [engine, selectedEntityId]);
+
+  const deselectAll = () => {
+      setSelectedEntityId(null);
+      setValidMoves([]);
+      setSelectedCityId(null);
+      setSelectedTilePos(null);
+      setCityTab('units');
+  }
+
+  const handleTileClick = (x: number, y: number, z: number, e: React.MouseEvent) => {
+    if (showTechTree) return;
+    if (currentOwner !== 'player') return;
+
+    const tile = engine.grid[z][y][x];
+    if (tile.visibility === Visibility.HIDDEN) return; 
+
+    if (tile.visibility !== Visibility.VISIBLE) {
+        addLog("Cannot target into Fog.");
+        return;
+    }
+    
+    if (tile.type === 'Void' && !selectedEntityId) return;
+
+    const clickedUnit = engine.getUnitAt(x, y, z);
+    const clickedCity = engine.getCityAt(x, y, z);
+
+    if (selectedEntityId) {
+       const targetMove = validMoves.find(vm => vm.x === x && vm.y === y && vm.z === z);
+       if (targetMove) {
+          engine.moveUnitTo(selectedEntityId, x, y, z);
+          deselectAll();
+          return;
+       } 
+       if (clickedUnit && clickedUnit.ownerId === 'player' && clickedUnit.id !== selectedEntityId) {
+          selectUnit(clickedUnit);
+          return;
+       }
+       if (!clickedUnit && clickedCity && clickedCity.ownerId === 'player') {
+           deselectAll();
+           setSelectedCityId(clickedCity.id);
+           return;
+       }
+       if (!clickedUnit && !clickedCity && tile.ownerId === 'player') {
+           deselectAll();
+           setSelectedTilePos({x, y, z});
+           return;
+       }
+       deselectAll();
+       return;
+    } 
+    
+    if (clickedUnit && clickedUnit.ownerId === 'player') {
+       selectUnit(clickedUnit);
+    } else if (clickedCity && clickedCity.ownerId === 'player') {
+       deselectAll();
+       setSelectedCityId(clickedCity.id);
+    } else if (tile.ownerId === 'player' && !clickedUnit && !clickedCity) {
+       deselectAll();
+       setSelectedTilePos({x, y, z});
+    } else {
+       deselectAll();
+    }
+  };
+
+  const selectUnit = (unit: Entity) => {
+      deselectAll();
+      if (unit.hasMoved) {
+          addLog(`${unit.type} has no moves left.`);
+          return;
+      }
+      setSelectedEntityId(unit.id);
+      const moves = engine.getValidMoves(unit);
+      setValidMoves(moves);
+      addLog(`${unit.type} selected.`);
+  };
+
+  const handleEnqueue = (key: string, type: 'UNIT' | 'BUILDING') => {
+      if (!selectedCityId) return;
+      const success = engine.enqueueProduction(selectedCityId, key, type);
+      if (success) {
+          addLog(`Queued ${key}.`);
+          forceUpdate({});
+      } else {
+          addLog("Cannot produce: Cost, duplicate, or locked.");
+      }
+  };
+  
+  const handleConstructImprovement = (impId: string) => {
+      if (!selectedTilePos) return;
+      const success = engine.constructImprovement(selectedTilePos.x, selectedTilePos.y, selectedTilePos.z, impId);
+      if (success) {
+          addLog(`Built ${DEFAULT_CONFIG.improvements[impId].name}`);
+          setSelectedTilePos(null); 
+      } else {
+          addLog("Cannot build: Cost, Tech, or Terrain.");
+      }
+  }
+
+  const handleEndTurn = () => engine.endTurn();
+  const handleResearch = (techId: string) => engine.researchTech(techId);
+  const handleRegenerate = () => {
+      engine.config.map.noiseSeed += 123;
+      engine.generateGrid();
+      setTurnNumber(1);
+      setCurrentOwner('player');
+      deselectAll();
+  };
+  const handleReset = () => {
+      const newEngine = new WhiteboxEngine(DEFAULT_CONFIG);
+      setEngine(newEngine);
+      setTurnNumber(1);
+      setCurrentOwner('player');
+      setEntities([...newEngine.entities]);
+      setPlayerState({...newEngine.playerState});
+      deselectAll();
+      setLogs(['System reset.']);
+  }
+  
+  const getUnitCost = (key: string) => DEFAULT_CONFIG.units[key].components.find(c => c.type === 'Cost')?.stars || 0;
+  const selectedCity = selectedCityId ? entities.find(e => e.id === selectedCityId) : null;
+  const techList = Object.values(DEFAULT_CONFIG.techs);
+  const selectedTile = selectedTilePos ? engine.grid[selectedTilePos.z][selectedTilePos.y][selectedTilePos.x] : null;
+
+  const renderGridLayer = (layerIndex: number, isInteractive: boolean) => {
+      const flattenedTiles = engine.grid[layerIndex].flat();
+      // Sort by Y first (back to front), then X for correct painter's algorithm on hexes
+      flattenedTiles.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+
+      return (
+        <div className="absolute top-0 left-0 w-full h-full">
+            {flattenedTiles.map((tile) => {
+                const pos = getHexPosition(tile.x, tile.y, layerIndex);
+                // Apply global centering
+                const left = pos.x + viewOffset.x;
+                const top = pos.y + viewOffset.y;
+                
+                // Z Index Logic: Lower rows must be in front of upper rows. 
+                // X helps with tie-breaking within row
+                const zIndex = (tile.y * 100) + tile.x + (layerIndex * 10000);
+
+                const entity = entities.find(e => e.x === tile.x && e.y === tile.y && e.z === tile.z && e.type !== 'city'); 
+                const structure = entities.find(e => e.x === tile.x && e.y === tile.y && e.z === tile.z && e.type === 'city');
+                const visualEntity = entity || structure;
+                const unitDef = visualEntity ? DEFAULT_CONFIG.units[visualEntity.type] : null;
+
+                const isOwned = tile.ownerId !== undefined;
+                const isPlayerOwned = tile.ownerId === 'player';
+                const isHidden = tile.visibility === Visibility.HIDDEN && tile.type !== 'Void';
+                
+                const targetMove = isInteractive ? validMoves.find(m => m.x === tile.x && m.y === tile.y && m.z === layerIndex) : null;
+                const isValidMove = !!targetMove;
+                const isAttack = targetMove?.isAttack;
+                const isSelected = isInteractive && ((entity && entity.id === selectedEntityId) || (structure && structure.id === selectedCityId));
+                const isTileSelected = isInteractive && selectedTilePos?.x === tile.x && selectedTilePos?.y === tile.y && selectedTilePos?.z === tile.z;
+                
+                if (tile.type === 'Void') return null;
+                
+                let paletteKey = (layerIndex === 1 && tile.type === 'Ground') ? 'SkyGround' : tile.type;
+                if (isHidden) paletteKey = 'Cloud';
+                
+                const colors = COLOR_PALETTE[paletteKey] || COLOR_PALETTE['Ground'];
+
+                // Variable Heights
+                const isMountain = tile.type === 'Mountain';
+                const isWater = tile.type === 'Water';
+                
+                const extrusion = (isMountain && !isHidden) ? HEX_METRICS.EXTRUSION * 1.5 : ((isWater && !isHidden) ? 4 : HEX_METRICS.EXTRUSION);
+                
+                const isCloud = isHidden;
+                const cloudOffset = isCloud ? -16 : 0; 
+                
+                const isFogged = tile.visibility === Visibility.FOGGED;
+                const opacity = isFogged ? 0.6 : 1;
+                const grayscale = isFogged ? 'grayscale(80%)' : 'none';
+
+                return (
+                    <div 
+                        key={`${tile.x}-${tile.y}-${tile.z}`}
+                        onClick={(e) => isInteractive && handleTileClick(tile.x, tile.y, tile.z, e)} 
+                        style={{
+                            position: 'absolute',
+                            left: `${left}px`,
+                            top: `${top}px`,
+                            zIndex: zIndex,
+                            width: `${HEX_METRICS.WIDTH}px`,
+                            height: `${HEX_METRICS.HEIGHT + extrusion}px`, 
+                            cursor: (isInteractive && !isHidden) ? 'pointer' : 'default',
+                            transition: 'transform 0.2s',
+                            transform: (isSelected || isTileSelected) ? 'translateY(-8px)' : `translateY(${cloudOffset}px)`,
+                            filter: grayscale,
+                            opacity: opacity
+                        }}
+                    >
+                         {/* TOP FACE (Hexagon) */}
+                         <div style={{
+                             position: 'absolute',
+                             top: 0,
+                             left: 0,
+                             width: HEX_METRICS.WIDTH,
+                             height: HEX_METRICS.HEIGHT,
+                             backgroundColor: colors.top,
+                             // Pointy Top Hexagon Clip Path
+                             clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)',
+                             zIndex: 10
+                         }}>
+                            {/* Border / Highlight for Owner */}
+                            {isOwned && !isHidden && (
+                                <div className={`absolute inset-0 border-[6px] opacity-40 ${isPlayerOwned ? 'border-blue-300' : 'border-red-500'}`} style={{ clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)' }}></div>
+                            )}
+                            {/* Selection Ring */}
+                            {(isSelected || isTileSelected) && (
+                                <div className="absolute inset-0 border-[4px] border-yellow-300 animate-pulse z-20" style={{ clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)' }}></div>
+                            )}
+                         </div>
+
+                         {/* SIDE FACES (Extrusion) - Simplified 3D look for Hex */}
+                         
+                         {/* Generic Extrusion Background (The "Block") */}
+                         <div style={{
+                             position: 'absolute',
+                             top: extrusion, 
+                             left: 0,
+                             width: HEX_METRICS.WIDTH,
+                             height: HEX_METRICS.HEIGHT,
+                             backgroundColor: colors.right,
+                             // Shows bottom 3 faces of the hexagonal prism
+                             clipPath: 'polygon(50% 100%, 100% 75%, 100% 25%, 50% 50%, 0% 25%, 0% 75%)', 
+                             zIndex: 4,
+                             filter: 'brightness(0.7)'
+                         }}></div>
+                         
+                         {/* DECOR / UNITS (Floating Above) */}
+                         {!isHidden && (
+                            <div className="absolute w-full h-full flex justify-center items-center pointer-events-none z-20" style={{ top: -extrusion }}>
+                                  {/* Valid Move Indicator */}
+                                  {isValidMove && !isAttack && (
+                                      <div className="w-4 h-4 rounded-full bg-emerald-400 animate-pulse mt-8 shadow-[0_0_10px_#34d399] z-50"></div>
+                                  )}
+                                  {isValidMove && isAttack && (
+                                      <div className="w-10 h-10 border-4 border-red-500 rounded-full animate-ping opacity-40 mt-8 z-50"></div>
+                                  )}
+
+                                  {/* Resource */}
+                                  {tile.resource && !visualEntity && (
+                                      <div className="text-2xl mt-4 drop-shadow-md">{RESOURCE_ICONS[tile.resource]}</div>
+                                  )}
+                                  {tile.improvement && !visualEntity && (
+                                      <div className="text-2xl mt-4 drop-shadow-md">{DEFAULT_CONFIG.improvements[tile.improvement].symbol}</div>
+                                  )}
+
+                                  {/* Structures */}
+                                  {structure && (
+                                      <div className="w-16 h-20 mt-[-10px]">
+                                          <CityStructure color={unitDef?.color || '#ccc'} level={structure.components['CityStats']?.level || 1} />
+                                      </div>
+                                  )}
+
+                                  {/* Units */}
+                                  {entity && unitDef && (
+                                      <div className="w-12 h-12 mt-0 relative hover:scale-110 transition-transform origin-bottom">
+                                           <MeepleUnit color={unitDef.color} />
+                                           <div className="absolute -top-2 left-2 w-8 h-1 bg-gray-700 border border-black">
+                                                <div className="h-full bg-green-500" style={{ width: `${(entity.components['Health']?.current / entity.components['Health']?.max) * 100}%`}}></div>
+                                           </div>
+                                      </div>
+                                  )}
+                             </div>
+                         )}
+
+                    </div>
+                );
+            })}
+        </div>
+      );
+  };
+
+  return (
+    <div className="flex flex-col h-full overflow-hidden bg-gray-900 text-gray-200">
+      <div className="flex items-center justify-between p-4 border-b border-gray-700 bg-gray-800 shadow-xl z-20">
+        <div className="flex items-center space-x-8">
+          <div className="flex flex-col">
+            <span className="text-gray-500 text-[10px] uppercase tracking-wider font-bold">Turn</span>
+            <div className="text-2xl font-bold font-mono text-white leading-none">{turnNumber}</div>
+          </div>
+          <div className="flex items-center space-x-2 bg-gray-900 px-4 py-2 rounded-lg border border-gray-700">
+             <span className="text-2xl">⭐</span>
+             <div className="flex flex-col">
+                 <div className="text-xl font-bold text-yellow-400 leading-none">{playerState.stars}</div>
+                 <span className="text-[10px] text-green-400 font-mono">+{playerState.income}/turn</span>
+             </div>
+          </div>
+          {currentOwner !== 'player' && (
+              <div className="animate-pulse bg-red-900/50 border border-red-500 text-red-100 px-4 py-2 rounded font-bold tracking-widest uppercase">
+                  Enemy Thinking...
+              </div>
+          )}
+        </div>
+        
+        <div className="flex space-x-2 bg-gray-900 p-1 rounded border border-gray-600">
+             <button onClick={() => setViewLayer(1)} className={`px-3 py-1 text-xs font-bold rounded ${viewLayer === 1 ? 'bg-sky-500 text-white' : 'text-gray-400 hover:text-white'}`}>☁️ Sky</button>
+             <button onClick={() => setViewLayer(0)} className={`px-3 py-1 text-xs font-bold rounded ${viewLayer === 0 ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:text-white'}`}>🌍 Ground</button>
+        </div>
+        
+        <div className="flex items-center space-x-4">
+          <button onClick={() => setShowTechTree(true)} className="px-4 py-3 bg-purple-700 hover:bg-purple-600 text-white font-bold rounded shadow-lg flex items-center">
+             <span className="mr-2">🔬</span> Tech
+          </button>
+          <button onClick={handleEndTurn} disabled={currentOwner !== 'player'} className={`px-6 py-3 font-bold rounded shadow-lg flex items-center ${currentOwner !== 'player' ? 'bg-gray-700 text-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500 text-white'}`}>
+            End Turn
+            <svg className="w-5 h-5 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
+          </button>
+        </div>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden relative bg-gray-950" ref={containerRef}>
+         <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,#1e293b_0%,#0f172a_100%)] opacity-50 pointer-events-none"></div>
+            
+         {/* The Isometric Container */}
+         <div className="relative w-full h-full">
+            {viewLayer === 0 && (
+               <>
+                  {renderGridLayer(0, true)}
+                  {/* Ghost Sky */}
+                  <div style={{ opacity: 0.2, filter: 'blur(4px)', transform: 'translateY(-120px)' }}>
+                     {renderGridLayer(1, false)}
+                  </div>
+               </>
+            )}
+            {viewLayer === 1 && (
+               <>
+                  <div style={{ opacity: 0.3, filter: 'brightness(0.3) blur(2px)', pointerEvents: 'none' }}>
+                     {renderGridLayer(0, false)}
+                  </div>
+                  {renderGridLayer(1, true)}
+               </>
+            )}
+         </div>
+
+         {/* UI Overlays (City, Tech, etc.) - Unchanged logic, just keeping structure */}
+         {selectedCity && !showTechTree && (
+            <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 bg-gray-800 border border-gray-600 rounded-lg shadow-2xl p-4 w-96 z-40 animate-in slide-in-from-bottom-5">
+               <div className="flex justify-between items-start mb-4 border-b border-gray-700 pb-2">
+                   <div><h2 className="text-xl font-bold text-white flex items-center">🏰 {selectedCity.name} <span className="ml-2 text-xs bg-yellow-500 text-black px-1.5 rounded">Lvl {selectedCity.components['CityStats']?.level || 1}</span></h2><span className="text-xs text-gray-500">Population: {selectedCity.components['CityStats']?.population || 0}</span></div>
+                   <button onClick={() => setSelectedCityId(null)} className="text-gray-400 hover:text-white">✕</button>
+               </div>
+               <div className="flex mb-4 border-b border-gray-700">
+                   <button onClick={() => setCityTab('units')} className={`flex-1 py-1 text-xs font-bold uppercase ${cityTab === 'units' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-gray-500 hover:text-gray-300'}`}>Units</button>
+                   <button onClick={() => setCityTab('buildings')} className={`flex-1 py-1 text-xs font-bold uppercase ${cityTab === 'buildings' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-gray-500 hover:text-gray-300'}`}>Buildings</button>
+                   <button onClick={() => setCityTab('queue')} className={`flex-1 py-1 text-xs font-bold uppercase ${cityTab === 'queue' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-gray-500 hover:text-gray-300'}`}>Queue ({selectedCity.productionQueue.length})</button>
+               </div>
+               {/* Content based on tab - same as before */}
+               {cityTab === 'queue' && (
+                   <div className="mb-4"><h3 className="text-xs font-bold text-gray-400 uppercase mb-2">Production Queue</h3><div className="space-y-1 max-h-32 overflow-y-auto bg-gray-900/50 p-2 rounded">{selectedCity.productionQueue.length === 0 && <span className="text-xs text-gray-600 italic">Idle</span>}{selectedCity.productionQueue.map((item) => (<div key={item.id} className="flex justify-between items-center text-sm p-1 bg-gray-800 border border-gray-700 rounded"><div className="flex items-center"><span className="mr-2">{item.type === 'UNIT' ? DEFAULT_CONFIG.units[item.key].symbol : DEFAULT_CONFIG.buildings[item.key].symbol}</span><span>{item.type === 'UNIT' ? DEFAULT_CONFIG.units[item.key].name : DEFAULT_CONFIG.buildings[item.key].name}</span></div><span className="text-xs font-mono text-yellow-400">{item.turnsRemaining}t</span></div>))}</div></div>
+               )}
+               {cityTab === 'units' && (
+                   <div className="grid grid-cols-2 gap-4"><div><h3 className="text-xs font-bold text-gray-400 uppercase mb-2">Train Units</h3><div className="space-y-1">{Object.keys(DEFAULT_CONFIG.units).filter(k => k !== 'city').map(key => { const cost = getUnitCost(key); const canAfford = playerState.stars >= cost; return (<button key={key} onClick={() => handleEnqueue(key, 'UNIT')} disabled={!canAfford} className={`w-full flex justify-between px-2 py-1.5 rounded border text-xs ${canAfford ? 'bg-gray-700 hover:bg-gray-600 border-gray-600' : 'bg-gray-800 text-gray-500 cursor-not-allowed'}`}><span>{DEFAULT_CONFIG.units[key].symbol} {DEFAULT_CONFIG.units[key].name}</span><span>{cost}⭐</span></button>)})}</div></div></div>
+               )}
+               {cityTab === 'buildings' && (
+                   <div className="space-y-2 max-h-40 overflow-y-auto">
+                       {Object.values(DEFAULT_CONFIG.buildings).map(b => {
+                           const isBuilt = selectedCity.buildings?.includes(b.id);
+                           const isQueued = selectedCity.productionQueue.some(q => q.key === b.id);
+                           const hasTech = !b.techRequired || playerState.unlockedTechs.includes(b.techRequired);
+                           const canAfford = playerState.stars >= b.cost;
+                           if (isBuilt) return <div key={b.id} className="flex items-center p-2 bg-emerald-900/30 border border-emerald-700/50 rounded"><span className="text-xl mr-2">{b.symbol}</span><div className="flex-1"><div className="font-bold text-xs text-emerald-400">{b.name}</div><div className="text-[10px] text-gray-400">{b.description}</div></div><span className="text-emerald-500 text-xs">Built</span></div>;
+                           return (
+                               <button 
+                                  key={b.id} 
+                                  disabled={!hasTech || !canAfford || isQueued}
+                                  onClick={() => handleEnqueue(b.id, 'BUILDING')}
+                                  className={`w-full flex items-center p-2 rounded border text-left transition-all ${!hasTech ? 'opacity-50 grayscale bg-gray-800 border-gray-700' : (canAfford ? 'bg-gray-700 hover:bg-gray-600 border-gray-600' : 'bg-gray-800 text-gray-500 border-gray-700')}`}
+                               >
+                                   <span className="text-xl mr-2">{b.symbol}</span>
+                                   <div className="flex-1">
+                                       <div className="font-bold text-xs">{b.name}</div>
+                                       <div className="text-[10px] text-gray-400">{hasTech ? b.description : `Req: ${DEFAULT_CONFIG.techs[b.techRequired!].name}`}</div>
+                                   </div>
+                                   <div className="text-xs font-bold text-yellow-500 ml-2">{b.cost}⭐</div>
+                               </button>
+                           )
+                       })}
+                   </div>
+               )}
+            </div>
+         )}
+         {selectedTile && !showTechTree && (
+            <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 bg-gray-800 border border-gray-600 rounded-lg shadow-2xl p-4 w-96 z-40 animate-in slide-in-from-bottom-5">
+                <div className="flex justify-between items-start mb-4 border-b border-gray-700 pb-2"><div><h2 className="text-lg font-bold text-white flex items-center">Terrain: {selectedTile.type}</h2><span className="text-xs text-gray-400">Position: {selectedTile.x}, {selectedTile.y}</span></div><button onClick={() => setSelectedTilePos(null)} className="text-gray-400 hover:text-white">✕</button></div>
+                {selectedTile.resource && <div className="mb-4 bg-gray-700/30 p-2 rounded flex items-center"><span className="text-2xl mr-2">{RESOURCE_ICONS[selectedTile.resource]}</span><span className="font-bold capitalize">{selectedTile.resource}</span></div>}
+               {!selectedTile.improvement ? (
+                   <div><h3 className="text-xs font-bold text-gray-400 uppercase mb-2">Construction</h3><div className="grid grid-cols-2 gap-2">{Object.values(DEFAULT_CONFIG.improvements).map(imp => { const isTerrainValid = imp.validTerrain.includes(selectedTile.type); const isTechUnlocked = !imp.techRequired || playerState.unlockedTechs.includes(imp.techRequired); const canAfford = playerState.stars >= imp.cost; const canBuild = isTerrainValid && isTechUnlocked; let reason = ""; if (!isTerrainValid) reason = "Invalid Terrain"; else if (!isTechUnlocked) reason = `Need ${DEFAULT_CONFIG.techs[imp.techRequired!].name}`; else if (!canAfford) reason = "Too Expensive"; return (<button key={imp.id} onClick={() => canBuild && canAfford && handleConstructImprovement(imp.id)} disabled={!canBuild || !canAfford} className={`flex flex-col items-start p-2 rounded border text-xs ${canBuild && canAfford ? 'bg-gray-700 hover:bg-gray-600 border-gray-500 text-gray-200' : 'bg-gray-800/50 border-gray-800 text-gray-500 opacity-60'}`}><div className="flex justify-between w-full mb-1"><span className="font-bold">{imp.symbol} {imp.name}</span><span>{imp.cost}⭐</span></div><span className="text-[10px] opacity-70 mb-1">{imp.description}</span>{reason && <span className="text-[10px] text-red-400 font-mono">[{reason}]</span>}</button>)})}</div></div>
+               ) : (<div className="bg-gray-700/50 p-3 rounded border border-gray-600 flex items-center"><span className="text-2xl mr-3">{DEFAULT_CONFIG.improvements[selectedTile.improvement].symbol}</span><div><div className="font-bold">{DEFAULT_CONFIG.improvements[selectedTile.improvement].name}</div><div className="text-xs text-gray-400">{DEFAULT_CONFIG.improvements[selectedTile.improvement].description}</div></div></div>)}
+            </div>
+         )}
+         {showTechTree && (
+            <div className="absolute inset-0 z-50 bg-gray-900/95 flex flex-col items-center justify-center p-8 backdrop-blur-sm">
+               <div className="w-full max-w-5xl h-full flex flex-col">
+                    <div className="flex justify-between items-center mb-8 border-b border-gray-700 pb-4"><h2 className="text-3xl font-bold text-white">Technology Research</h2><button onClick={() => setShowTechTree(false)} className="text-gray-400 bg-gray-800 px-4 py-2 rounded">Close</button></div>
+                    <div className="flex-1 relative overflow-auto bg-gray-950 rounded-xl border border-gray-800 shadow-inner p-8">
+                         <div className="relative z-10" style={{ minWidth: '800px', minHeight: '800px' }}>
+                             {/* Dependency Lines - Simplified for now to just show nodes */}
+                             {Object.values(DEFAULT_CONFIG.techs).map(tech => { const isUnlocked = playerState.unlockedTechs.includes(tech.id); const hasPrereq = !tech.prerequisite || playerState.unlockedTechs.includes(tech.prerequisite); const canAfford = playerState.stars >= tech.cost; const isResearchable = !isUnlocked && hasPrereq; const statusClass = isUnlocked ? "bg-emerald-900/80 border-emerald-500 text-emerald-100" : (isResearchable && canAfford ? "bg-blue-900/80 border-blue-400 text-blue-100 cursor-pointer" : "bg-gray-800 border-gray-600 text-gray-500 opacity-50");
+                                 return (<div key={tech.id} onClick={() => isResearchable && canAfford && handleResearch(tech.id)} className={`absolute w-40 h-24 rounded-lg border-2 flex flex-col items-center justify-center p-2 text-center transition-all ${statusClass} hover:scale-105`} style={{ left: `${tech.column * 200}px`, top: `${tech.row * 140}px` }}><div className="text-2xl mb-1">{tech.symbol}</div><div className="font-bold text-sm">{tech.name}</div>{!isUnlocked && <div className="text-xs mt-1">{tech.cost} ⭐</div>}</div>);
+                             })}
+                         </div>
+                    </div>
+               </div>
+            </div>
+        )}
+        <div className="w-72 bg-gray-800 border-l border-gray-700 p-4 flex flex-col z-10"><div className="flex justify-between items-center mb-4"><h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Mission Log</h3><div className="flex space-x-2"><button onClick={handleRegenerate} className="text-xs text-blue-400 hover:text-blue-300">Regen</button><button onClick={handleReset} className="text-xs text-red-400 hover:text-red-300">Reset</button></div></div><div className="flex-1 overflow-y-auto space-y-2 font-mono text-xs">{logs.map((log, i) => (<div key={i} className="text-gray-400 border-b border-gray-700/50 pb-1 last:border-0"><span className="text-blue-500 mr-1">::</span>{log}</div>))}</div></div>
+      </div>
+    </div>
+  );
+};
