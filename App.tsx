@@ -1,13 +1,11 @@
 import React, { useState } from 'react';
 import { Documentation } from './components/Documentation';
 import { PrototypeView } from './components/PrototypeView';
-import { ArchitectAssistant } from './components/ArchitectAssistant';
 
 type View = 'tdd' | 'prototype';
 
 const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<View>('tdd');
-  const [isAssistantOpen, setIsAssistantOpen] = useState(false);
 
   return (
     <div className="flex flex-col h-screen bg-gray-900 text-gray-100 overflow-hidden">
@@ -42,13 +40,6 @@ const App: React.FC = () => {
         </div>
         
         <div className="flex items-center space-x-4">
-            <button 
-                onClick={() => setIsAssistantOpen(!isAssistantOpen)}
-                className={`flex items-center space-x-2 px-3 py-1.5 rounded border transition-all ${isAssistantOpen ? 'bg-purple-900/50 border-purple-500 text-purple-100' : 'bg-gray-800 border-gray-600 text-gray-300 hover:border-gray-400'}`}
-            >
-                <span className="text-lg">✨</span>
-                <span className="text-xs font-bold uppercase tracking-wider hidden sm:inline">AI Assist</span>
-            </button>
             <div className="text-xs text-gray-500 font-mono hidden sm:block">
             v0.1.0-alpha
             </div>
@@ -60,11 +51,6 @@ const App: React.FC = () => {
         <main className="flex-1 overflow-hidden relative w-full h-full">
             {currentView === 'tdd' ? <Documentation /> : <PrototypeView />}
         </main>
-        
-        {/* Assistant Overlay/Sidebar */}
-        {isAssistantOpen && (
-            <ArchitectAssistant onClose={() => setIsAssistantOpen(false)} currentView={currentView} />
-        )}
       </div>
     </div>
   );
