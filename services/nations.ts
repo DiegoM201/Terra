@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 // Simple nations loader using Vite's import.meta.glob
 // Returns a record keyed by nation id -> nation JSON
 
